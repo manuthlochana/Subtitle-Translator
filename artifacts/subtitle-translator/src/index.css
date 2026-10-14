@@ -488,3 +488,147 @@
 @keyframes pulse {50% {opacity:.4;}}
 @media(max-width:860px) {.workspace-grid{grid-template-columns:1fr}.page-heading{align-items:flex-start}.heading-index{display:none}}
 @media(max-width:560px) {.topbar{height:60px;padding:0 17px}.workspace{padding:27px 15px 45px}.page-heading h1{font-size:32px}.panel-body{padding:16px}.field-row{grid-template-columns:1fr}.panel-head{padding:15px 16px}.runbar{flex-wrap:wrap}.runbar .full-width{flex-basis:100%}.summary-cell{padding:9px 8px}.summary-value{font-size:14px}.progress-stats{gap:14px}.top-meta span:last-child{display:none}}
+
+/* Upgrades for Multi-Model & Quality Defense Monitor */
+.model-tagline-box {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: #14181e;
+  border: 1px solid #2b323c;
+  border-radius: 6px;
+}
+.model-tagline {
+  font-size: 11px;
+  color: #adb5bd;
+  margin: 0 0 6px 0;
+  line-height: 1.45;
+}
+.model-metrics {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.metric-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  background: #1c222b;
+  border: 1px solid #343d49;
+  border-radius: 4px;
+  font-size: 10px;
+  font-family: var(--app-font-mono);
+  color: #e2ba62;
+}
+.active-status-bar {
+  display: flex;
+  gap: 12px;
+  padding: 9px 12px;
+  background: #161b22;
+  border: 1px solid #2d3440;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+.status-badge-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.badge-lbl {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: #798390;
+  font-family: var(--app-font-mono);
+}
+.badge-val {
+  font-size: 12px;
+  color: #e6e5df;
+}
+.purity-card {
+  margin-top: 14px;
+  padding: 12px;
+  background: #14181e;
+  border: 1px solid #2d3540;
+  border-radius: 6px;
+}
+.purity-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.purity-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #d1d5db;
+}
+.purity-title svg {
+  color: #5bc49b;
+}
+.purity-badge {
+  font-size: 9px;
+  font-family: var(--app-font-mono);
+  padding: 3px 7px;
+  border-radius: 99px;
+  text-transform: uppercase;
+}
+.purity-badge.passed {
+  background: #153225;
+  color: #7be1b1;
+  border: 1px solid #23543d;
+}
+.purity-badge.healed {
+  background: #3a2e16;
+  color: #ecc36f;
+  border: 1px solid #634d21;
+}
+.purity-badge.healing {
+  background: #2a253a;
+  color: #b79bf2;
+  border: 1px solid #4a3e66;
+}
+.purity-badge.clean {
+  background: #1c222b;
+  color: #8c97a5;
+  border: 1px solid #303a46;
+}
+.purity-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  font-size: 10px;
+  color: #828c98;
+  font-family: var(--app-font-mono);
+  border-top: 1px solid #222933;
+  padding-top: 8px;
+}
+.purity-stats strong {
+  color: #e5e7eb;
+}
+.switch-banner {
+  margin-top: 10px;
+  padding: 9px 12px;
+  border-radius: 6px;
+  background: #332717;
+  border: 1px solid #634b28;
+  color: #f1cf85;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pacing-banner {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #1a222f;
+  border: 1px solid #2d3c52;
+  color: #9cbce7;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
