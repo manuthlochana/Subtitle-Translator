@@ -144,6 +144,13 @@ export const MODEL_REGISTRY: readonly ModelProfile[] = [
 
 export const DEFAULT_MODEL_ID = "gemini-3.5-flash-lite";
 
+/**
+ * Sampling temperature for Sinhala translation. A low value keeps token
+ * selection stable, which avoids fragmented Sinhala glyphs (detached vowel
+ * signs, broken conjuncts) and keeps repeated terms/pronouns consistent.
+ */
+export const SINHALA_TRANSLATION_TEMPERATURE = 0.2;
+
 const BY_ID = new Map(MODEL_REGISTRY.map((m) => [m.id, m]));
 
 export function getModel(id: string): ModelProfile | undefined {

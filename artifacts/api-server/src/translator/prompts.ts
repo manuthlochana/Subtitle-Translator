@@ -22,15 +22,32 @@ CRITICAL TRANSLATION & LINGUISTIC RULES:
    - Preserve HTML tags like \`<i>\`, \`</i>\`, and music symbols \`♪\`.
    - Maintain the exact number of subtitle blocks. Do not merge or skip blocks.`;
 
+/**
+ * Strict negative constraints added after observed production errors
+ * (currency hallucination, altered numbers, literal slang, tone drift).
+ */
+export const STRICT_CONSTRAINTS = `ADDITIONAL STRICT CONSTRAINTS (HIGHEST PRIORITY — THESE OVERRIDE STYLE PREFERENCES):
+7. CURRENCY — DO NOT CONVERT: Never convert, localise or swap currency units or symbols. "$", "dollar" and "dollars" are ALWAYS "ඩොලර්" — NEVER "රුපියල්" (rupees). Likewise keep euros, pounds, etc. as their own currency (යුරෝ, පවුම්). Amounts stay exactly as written ("$50" → "ඩොලර් 50", never a converted rupee value).
+8. NUMBERS, MEASUREMENTS & DECADES — VERBATIM: Keep every numerical quantity, age, price, time, score and measurement exactly as in the source and in Western digits ("75" stays "75"; never spell it out, change it, or round it). Decades are rendered by their meaning: "the '70s" / "the seventies" → "හැත්තෑව දශකය", "the '90s" → "අනූව දශකය". Never turn a decade into a different year or a quantity.
+9. MODERN & INTERNET SLANG — TRANSLATE THE MEANING, NOT THE WORDS: Interpret slang in context. "getting canceled" / "cancel culture" means being publicly called out, shamed or boycotted — it is NEVER about cancelling an appointment/order or anything literal (and never a food/drink such as coffee). Apply the same rule to "ghosted", "simp", "salty", "flex", "ratio", "sus", "no cap", "slay", etc.: convey the real social meaning in natural spoken Sinhala.
+10. PRONOUN & REGISTER POLICY (CONSISTENCY ACROSS THE WHOLE FILE AND ACROSS CHUNKS):
+   - Choose ONE register per speaker/addressee pair and keep it for the entire file. Default for peers and casual youth dialogue is "ඔයා" / "ඔයාලා"; "එයා" for a third person.
+   - Use "උඹ" / "තමුසේ" ONLY when the source dialogue is clearly hostile, contemptuous or extremely intimate, and then keep that pair on that register. Never drift between "ඔයා" and "උඹ" for the same pair without a clear change in the relationship in the source.
+   - Keep verb endings and politeness level uniform with the chosen register (no mixing of spoken and formal literary endings inside one conversation).
+   - Use the PREVIOUS CONTEXT block (when present) to continue the exact same register, gender and terminology — never to translate again.`;
+
+export const FULL_SYSTEM_PROMPT = `${SYSTEM_PROMPT}\n\n${STRICT_CONSTRAINTS}`;
+
 export const OUTPUT_CONTRACT = `OUTPUT FORMAT (MACHINE-VALIDATED):
-- Subtitle index numbers and timestamps are locked by the system. You receive each subtitle block as a JSON object {"id": "<block id>", "text": "<English dialogue>"}.
-- Return ONLY a JSON array with exactly one object per input block, in the same order: [{"id": "<same id>", "text": "<Sinhala dialogue>"}].
-- Never change, merge, skip, or invent ids. Keep line breaks (\\n) inside a block where they help readability.
-- Every response is scanned character-by-character. Any non-Sinhala script or parenthetical note causes the block to be rejected and re-requested.`;
+- Subtitle index numbers and timestamps are locked by the system. You receive each subtitle block as a JSON object {"id": <integer block id>, "text": "<English dialogue>"}.
+- Return ONLY a JSON array of objects {"id": <integer>, "text": "<Sinhala dialogue>"} with EXACTLY one object per input block, same ids, same order. The output array length MUST equal the input array length.
+- Never change, merge, skip, duplicate, or invent ids. Each id's text must contain ONLY the translation of that id's source text — never move words from one block into its neighbour.
+- Keep line breaks (\\n) inside a block where they help readability.
+- Every response is scanned character-by-character and structurally validated. Any non-Sinhala script, parenthetical note, missing id or length mismatch causes a re-request.`;
 
-export const TRANSLATION_SYSTEM_INSTRUCTION = `${SYSTEM_PROMPT}\n\n${OUTPUT_CONTRACT}`;
+export const TRANSLATION_SYSTEM_INSTRUCTION = `${FULL_SYSTEM_PROMPT}\n\n${OUTPUT_CONTRACT}`;
 
-export const REPAIR_SYSTEM_INSTRUCTION = `${SYSTEM_PROMPT}
+export const REPAIR_SYSTEM_INSTRUCTION = `${FULL_SYSTEM_PROMPT}
 
 ${OUTPUT_CONTRACT}
 
@@ -42,13 +59,13 @@ The blocks you receive were REJECTED by an automated Unicode/quality validator. 
 - No brackets or translator notes unless the English source itself contains brackets.
 - Never leave a block in English.`;
 
-/** Gemini structured-output schema: array of {id, text}. */
+/** Gemini structured-output schema: strictly an array of {id: integer, text: string}. */
 export const RESPONSE_SCHEMA = {
   type: "ARRAY",
   items: {
     type: "OBJECT",
     properties: {
-      id: { type: "STRING" },
+      id: { type: "INTEGER" },
       text: { type: "STRING" },
     },
     required: ["id", "text"],
@@ -61,26 +78,35 @@ export interface ContextBlock {
   sinhala: string;
 }
 
+export const PREVIOUS_CONTEXT_LABEL = "[PREVIOUS_CONTEXT_DO_NOT_TRANSLATE]";
+
 /**
- * Builds the user turn for a translation chunk. `context` implements Layer 3:
- * the last few translated blocks from the previous chunk are supplied as
- * READ-ONLY context so pronouns (ඔයා / උඹ / තමුසේ / එයා), gender and running
- * jokes stay consistent across chunk boundaries.
+ * Layer 3 context sliding: formats the last few translated blocks as a
+ * clearly labelled READ-ONLY section placed before the blocks to translate.
  */
+export function formatPreviousContext(context: ContextBlock[]): string[] {
+  if (!context.length) return [];
+  return [
+    PREVIOUS_CONTEXT_LABEL,
+    "These blocks are ALREADY translated. They are provided ONLY so you keep the same speaker voice, pronoun register (ඔයා / උඹ / තමුසේ / එයා), gender and running jokes. Do NOT translate them and do NOT include them in your output.",
+    JSON.stringify(context),
+    PREVIOUS_CONTEXT_LABEL.replace("[", "[/"),
+    "",
+  ];
+}
+
+/** Integer id sent to / expected from the model for a block. */
+export function blockId(block: SrtBlock): number {
+  return Number(block.key);
+}
+
+/** Builds the user turn for a translation chunk. */
 export function buildChunkPrompt(blocks: SrtBlock[], context: ContextBlock[]): string {
-  const parts: string[] = [];
-  if (context.length) {
-    parts.push(
-      "READ-ONLY CONTEXT — the previous subtitle blocks, already translated. Use them ONLY to keep speaker voice, pronouns (ඔයා/උඹ/තමුසේ/එයා), gender and running jokes consistent. Do NOT translate or output them again:",
-      JSON.stringify(context),
-      "",
-    );
-  }
-  parts.push(
-    `TRANSLATE THESE ${blocks.length} SUBTITLE BLOCKS. Return exactly ${blocks.length} objects with the same ids, in the same order:`,
-    JSON.stringify(blocks.map((b) => ({ id: b.key, text: b.text }))),
-  );
-  return parts.join("\n");
+  return [
+    ...formatPreviousContext(context),
+    `TRANSLATE THESE ${blocks.length} SUBTITLE BLOCKS. Return a JSON array of exactly ${blocks.length} objects {"id": <integer>, "text": "<Sinhala>"} using the same ids in the same order:`,
+    JSON.stringify(blocks.map((b) => ({ id: blockId(b), text: b.text }))),
+  ].join("\n");
 }
 
 export interface RepairItem {
@@ -90,26 +116,18 @@ export interface RepairItem {
 }
 
 export function buildRepairPrompt(items: RepairItem[], context: ContextBlock[]): string {
-  const parts: string[] = [];
-  if (context.length) {
-    parts.push(
-      "READ-ONLY CONTEXT — nearby blocks that already passed validation (do NOT output them):",
-      JSON.stringify(context),
-      "",
-    );
-  }
-  parts.push(
+  return [
+    ...formatPreviousContext(context),
     "REJECTED BLOCKS (reason and rejected output shown for reference only — do not reuse it):",
     JSON.stringify(
       items.map((item) => ({
-        id: item.block.key,
+        id: blockId(item.block),
         reason: item.reasons.join("; "),
         rejected: item.rejectedOutput ?? null,
       })),
     ),
     "",
-    `RE-TRANSLATE THESE ${items.length} BLOCKS FROM THE ENGLISH SOURCE. Return exactly ${items.length} objects with the same ids:`,
-    JSON.stringify(items.map((item) => ({ id: item.block.key, text: item.block.text }))),
-  );
-  return parts.join("\n");
+    `RE-TRANSLATE THESE ${items.length} BLOCKS FROM THE ENGLISH SOURCE. Return a JSON array of exactly ${items.length} objects {"id": <integer>, "text": "<Sinhala>"} with the same ids:`,
+    JSON.stringify(items.map((item) => ({ id: blockId(item.block), text: item.block.text }))),
+  ].join("\n");
 }

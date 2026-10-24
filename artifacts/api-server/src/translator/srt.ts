@@ -77,6 +77,8 @@ export function serializeSrt(
   for (const block of blocks) {
     const translated = translations.get(block.key);
     if (translated === undefined && !options.includeUntranslated) continue;
+    // INVARIANT: a gap is NEVER filled with another block's text (no "repeat the previous line").
+    // A block without a translation keeps its OWN original dialogue, so index/timestamp/text always stay aligned.
     const text = (translated ?? block.text).replace(/\r\n?/g, "\n");
     out.push([block.index, block.timestamp, text].join("\n"));
   }

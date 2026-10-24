@@ -9,7 +9,7 @@
 
 import { randomUUID } from "node:crypto";
 import { logger } from "../lib/logger";
-import { estimateInputTokens, estimateOutputTokens, estimateRemainingChunks, nextChunkSize } from "./chunker";
+import { CONTEXT_LINES, buildSlidingContext, estimateInputTokens, estimateOutputTokens, estimateRemainingChunks, nextChunkSize } from "./chunker";
 import { GeminiError, generateTranslation, type GeminiResult } from "./gemini";
 import {
   getFallbackChain,
@@ -28,7 +28,14 @@ import {
   type RepairItem,
 } from "./prompts";
 import { QuotaExhaustedError, acquire, hashKey, markExhausted, sleep, usageSnapshot } from "./rateLimiter";
-import { sanitizeAndValidateSinhalaSRT, stripForeignScripts, validateSinhalaBlock, type RejectedBlock } from "./sanitizer";
+import {
+  checkResponseStructure,
+  sanitizeAndValidateSinhalaSRT,
+  selfTestSinhalaPreservation,
+  stripForeignScripts,
+  validateSinhalaBlock,
+  type RejectedBlock,
+} from "./sanitizer";
 import { isUntranslatable, serializeSrt, type SrtBlock } from "./srt";
 
 export type JobState = "queued" | "running" | "paused" | "complete" | "failed" | "cancelled";
@@ -56,7 +63,20 @@ interface ModelSwitch {
 
 class FatalJobError extends Error {}
 
-const CONTEXT_WINDOW = 5;
+// Startup regression guard: known-good Sinhala (ZWJ conjuncts, vowel signs, virama) must pass the sanitizer untouched.
+const sinhalaSelfTestFailures = selfTestSinhalaPreservation();
+if (sinhalaSelfTestFailures.length) {
+  logger.error({ failures: sinhalaSelfTestFailures }, "Sinhala sanitizer self-test FAILED — glyphs may be corrupted");
+} else {
+  logger.info("Sinhala sanitizer self-test passed (ZWJ / vowel signs / virama preserved)");
+}
+
+/** Already-translated lines carried into the next chunk as [PREVIOUS_CONTEXT_DO_NOT_TRANSLATE] (3–5). */
+const CONTEXT_WINDOW = CONTEXT_LINES.max;
+/** Chunk-level attempts when the model merges / drops / duplicates ids or returns the wrong length. */
+const STRUCTURE_ATTEMPTS = 3;
+const STRUCTURE_BACKOFF_BASE_MS = 3_000;
+const STRUCTURE_BACKOFF_CAP_MS = 30_000;
 const MAX_RETRIES_PER_MODEL = 3;
 const BACKOFF_BASE_MS = 5_000;
 const BACKOFF_CAP_MS = 90_000;
@@ -98,6 +118,7 @@ export class TranslationJob {
   private events: JobEvent[] = [];
   private modelSwitches: ModelSwitch[] = [];
   private chunksDone = 0;
+  private structureRetries = 0;
   private requests = 0;
   private tokens = { input: 0, output: 0 };
   private currentChunk?: { from: number; to: number; size: number };
@@ -243,12 +264,13 @@ export class TranslationJob {
         size: chunk.length,
       };
       const context = this.rollingContext(chunk[0]);
-      const outcome = await this.callWithFallback(
+      const outcome = await this.callStrict(
         TRANSLATION_SYSTEM_INSTRUCTION,
         buildChunkPrompt(chunk, context),
         chunk,
         strategy,
         signal,
+        "Chunk",
       );
 
       if (outcome.type === "switched") continue;
@@ -328,12 +350,13 @@ export class TranslationJob {
         }));
         const blocks = batch.map((b) => b.block);
         this.currentChunk = { from: Number(blocks[0].index) || 0, to: Number(blocks[blocks.length - 1].index) || 0, size: blocks.length };
-        const outcome = await this.callWithFallback(
+        const outcome = await this.callStrict(
           REPAIR_SYSTEM_INSTRUCTION,
           buildRepairPrompt(batch, this.neighbourContext(blocks)),
           blocks,
           "chunked",
           signal,
+          "Repair",
         );
         if (outcome.type === "switched") continue; // retry same batch with next model
         if (outcome.type === "split") {
@@ -473,16 +496,57 @@ export class TranslationJob {
     return { type: "switched" };
   }
 
+  // ── strict structural validation with chunk-level retry ────────────────
+
+  /**
+   * Wraps callWithFallback with a STRICT structural check: the response must be an
+   * array with exactly one item per requested block and every id must match 1:1.
+   * If the model merged lines, dropped an id, duplicated an id or returned the wrong
+   * length, the whole chunk is re-requested (exponential backoff, up to
+   * STRUCTURE_ATTEMPTS attempts) with a corrective note. Nothing is ever patched by
+   * copying a neighbouring line. If all attempts fail, the valid subset is kept and
+   * the rest is queued for auto-heal.
+   */
+  private async callStrict(
+    systemInstruction: string,
+    userText: string,
+    blocks: SrtBlock[],
+    strategy: ExecutionStrategy,
+    signal: AbortSignal,
+    label: string,
+  ): Promise<CallOutcome> {
+    let lastBad: CallOutcome | undefined;
+    let prompt = userText;
+    for (let attempt = 1; attempt <= STRUCTURE_ATTEMPTS; attempt += 1) {
+      const outcome = await this.callWithFallback(systemInstruction, prompt, blocks, strategy, signal);
+      // Non-ok outcomes (model switch / split) and deliberately truncated responses are handled by the callers.
+      if (outcome.type !== "ok" || outcome.result.truncated) return outcome;
+
+      const check = checkResponseStructure(blocks, outcome.result.items);
+      if (check.ok) return outcome;
+
+      lastBad = outcome;
+      this.structureRetries += 1;
+      const issues = check.issues.join("; ");
+      if (attempt === STRUCTURE_ATTEMPTS) {
+        this.log("warn", `${label} failed structural validation ${STRUCTURE_ATTEMPTS}× (${issues}). Keeping the valid blocks; the rest go to auto-heal.`);
+        break;
+      }
+      const backoff = Math.min(STRUCTURE_BACKOFF_CAP_MS, STRUCTURE_BACKOFF_BASE_MS * 2 ** (attempt - 1)) + Math.floor(Math.random() * 500);
+      this.log("warn", `${label} structural check failed (${issues}). Re-requesting the chunk in ${Math.round(backoff / 1000)}s (attempt ${attempt + 1}/${STRUCTURE_ATTEMPTS}).`);
+      prompt = `${userText}\n\nYOUR PREVIOUS ATTEMPT WAS REJECTED: ${issues}. Return EXACTLY ${blocks.length} objects, one per input id, the same ids, nothing merged, skipped, split or duplicated.`;
+      this.waiting = { reason: "Retrying chunk after structural validation failure", until: Date.now() + backoff };
+      await sleep(backoff, signal);
+      this.waiting = undefined;
+    }
+    return lastBad as CallOutcome;
+  }
+
   // ── context windows (Layer 3) ──────────────────────────────────────────
 
+  /** Last 3–5 translated lines before this chunk (see buildSlidingContext in chunker.ts). */
   private rollingContext(first: SrtBlock): ContextBlock[] {
-    const context: ContextBlock[] = [];
-    for (let i = this.positionOf.get(first.key)! - 1; i >= 0 && context.length < CONTEXT_WINDOW; i -= 1) {
-      const block = this.blocks[i];
-      const sinhala = this.translations.get(block.key);
-      if (sinhala !== undefined && !isUntranslatable(block.text)) context.unshift({ source: block.text, sinhala });
-    }
-    return context;
+    return buildSlidingContext(this.blocks, this.translations, this.positionOf.get(first.key)!, CONTEXT_WINDOW);
   }
 
   private neighbourContext(blocks: SrtBlock[]): ContextBlock[] {
@@ -584,6 +648,7 @@ export class TranslationJob {
         unresolved: this.unresolved.size,
       },
       requests: this.requests,
+      structureRetries: this.structureRetries,
       tokens: this.tokens,
       quota: this.chain.map((m) => ({ modelId: m.id, ...usageSnapshot(this.keyHash, m) })),
       recent,

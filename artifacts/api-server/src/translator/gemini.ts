@@ -2,6 +2,7 @@
  * Minimal Gemini REST client with error classification.
  */
 
+import { SINHALA_TRANSLATION_TEMPERATURE } from "./models";
 import { RESPONSE_SCHEMA } from "./prompts";
 
 const API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -142,6 +143,7 @@ export async function generateTranslation(options: {
         generationConfig: {
           responseMimeType: "application/json",
           responseSchema: RESPONSE_SCHEMA,
+          temperature: SINHALA_TRANSLATION_TEMPERATURE,
           maxOutputTokens: 65_536,
         },
       }),

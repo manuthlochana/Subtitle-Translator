@@ -26,14 +26,34 @@ export const FORBIDDEN_SCRIPTS: ReadonlyArray<{ name: string; re: RegExp }> = [
 const FORBIDDEN_ANY = /[\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0980-\u09FF\u0900-\u097F\u10A0-\u10FF\u1000-\u109F\u1200-\u137F\u0600-\u06FF]/u;
 const FORBIDDEN_ANY_G = new RegExp(FORBIDDEN_ANY.source, "gu");
 
-const SINHALA_CHAR = /[\u0D80-\u0DFF]/u;
-const SINHALA_ONLY_WORDS = /^[\u0D80-\u0DFF\u200C\u200D\s.,!?'"’‘“”…\-–—]+$/u;
-/** Any letter/mark that is not Sinhala, Latin, or script-neutral (Common/Inherited). */
+/**
+ * Sinhala Unicode block U+0D80–U+0DFF: letters, anusvara/visarga, virama (හල් කිරීම),
+ * vowel signs (පිලි / ඇලපිලි …), Sinhala digits and punctuation. NOTHING in this
+ * range may ever be removed or altered by the cleaning code below.
+ */
+const SINHALA_RANGE = "\\u0D80-\\u0DFF";
+/** Joiners are REQUIRED by Sinhala for conjuncts (ක්‍ර, ශ්‍රී, ක්‍ය …). They must never be stripped. */
+const JOINERS = "\\u200C\\u200D";
+/** Dependent signs that must stay attached to a preceding base letter: ං ඃ ් ා ැ ෑ ි ී ු ූ ෘ ෙ ේ ෛ ො ෝ ෞ ෟ ෲ ෳ */
+const DEPENDENT_SIGNS = "\\u0D82\\u0D83\\u0DCA\\u0DCF-\\u0DDF\\u0DF2\\u0DF3";
+
+const SINHALA_CHAR = new RegExp(`[${SINHALA_RANGE}]`, "u");
+const SINHALA_CHAR_G = new RegExp(`[${SINHALA_RANGE}]`, "gu");
+const SINHALA_ONLY_WORDS = new RegExp(`^[${SINHALA_RANGE}${JOINERS}\\s.,!?'"’‘“”…\\-–—]+$`, "u");
+/** A dependent sign with no base letter before it (start of text, or after a non-Sinhala character / whitespace). */
+const ORPHAN_SIGN = new RegExp(`(?:^|[^${SINHALA_RANGE}${JOINERS}])[${DEPENDENT_SIGNS}]`, "u");
+/** Any letter/mark that is not Sinhala, Latin, or script-neutral (Common/Inherited — this includes ZWJ/ZWNJ). */
 const OTHER_SCRIPT_LETTER = /(?![\p{Script=Sinhala}\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}])[\p{L}\p{M}]/u;
 const OTHER_SCRIPT_LETTER_G = new RegExp(OTHER_SCRIPT_LETTER.source, "gu");
 
-/** Invisible characters to drop. ZWJ (U+200D) and ZWNJ (U+200C) are KEPT: Sinhala needs them for conjuncts (e.g. ශ්‍රී). */
+/**
+ * Invisible characters to drop. Deliberately excludes U+200C (ZWNJ) and
+ * U+200D (ZWJ): Sinhala needs them, and removing them detaches/corrupts conjuncts.
+ * (Zero-width space U+200B, word joiner U+2060, BOM U+FEFF, soft hyphen and bidi
+ * controls are safe to drop.)
+ */
 const INVISIBLES = /[\u200B\u2060\uFEFF\u00AD\u202A-\u202E\u2066-\u2069]/gu;
+/** C0 control characters except \n (and tab). Never touches the Sinhala block. */
 const CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F]/gu;
 
 const LEAKED_TIMESTAMP = /^\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}.*$/;
@@ -121,7 +141,12 @@ export function validateSinhalaBlock(source: string, raw: string): LineCheck {
 
   let text = raw.normalize("NFC").replace(/\r\n?/g, "\n").replace(INVISIBLES, "").replace(CONTROL_CHARS, "");
   // Drop leaked SRT structure (index / timestamp lines) the model may echo back.
-  const lines = text.split("\n").filter((line, i) => !LEAKED_TIMESTAMP.test(line) && !(i === 0 && /^\s*\d+\s*$/.test(line) && !/^\s*\d+\s*$/.test(source)));
+  const lines = text.split("\n").filter((line, i) => {
+    if (LEAKED_TIMESTAMP.test(line)) return false;
+    // A bare-number first line is only a leaked SRT index if that number is NOT part of the source dialogue.
+    if (i === 0 && /^\s*\d+\s*$/.test(line) && !source.includes(line.trim())) return false;
+    return true;
+  });
   text = lines.map((l) => l.replace(/[ \t]+$/g, "").replace(/[ \t]{2,}/g, " ")).join("\n").trim();
 
   if (!HAS_BRACKETS.test(source) && HAS_BRACKETS.test(text)) {
@@ -135,12 +160,15 @@ export function validateSinhalaBlock(source: string, raw: string): LineCheck {
   const foreignScripts = detectForeignScripts(text);
   if (foreignScripts.length) problems.push(`foreign script detected: ${foreignScripts.join(", ")}`);
 
+  // Dependent vowel signs / virama must always follow a base consonant; a detached one means the glyph is corrupted.
+  if (ORPHAN_SIGN.test(text.replace(/<[^>]+>/g, ""))) problems.push("detached Sinhala vowel sign (corrupted glyph)");
+
   const sourceLetters = source.replace(/<[^>]+>/g, "").match(/\p{L}/gu)?.length ?? 0;
   const plain = text.replace(/<[^>]+>/g, "");
   if (!plain.trim()) {
     problems.push("empty translation");
   } else if (sourceLetters > 0) {
-    const sinhala = plain.match(/[\u0D80-\u0DFF]/gu)?.length ?? 0;
+    const sinhala = plain.match(SINHALA_CHAR_G)?.length ?? 0;
     const latin = plain.match(/[A-Za-z]/g)?.length ?? 0;
     if (sinhala === 0) problems.push("not translated (no Sinhala text)");
     else if (latin > sinhala) problems.push("mostly untranslated English");
@@ -168,6 +196,59 @@ export interface SanitizeResult {
   };
 }
 
+/** Normalises a model-provided id (integer or numeric string) to the internal string key. */
+export function normaliseId(id: unknown): string | undefined {
+  if (typeof id === "number" && Number.isFinite(id)) return String(Math.trunc(id));
+  if (typeof id === "string" && /^\s*\d+\s*$/.test(id)) return String(Number(id.trim()));
+  return undefined;
+}
+
+export interface StructureCheck {
+  ok: boolean;
+  issues: string[];
+}
+
+/**
+ * Strict structural validation of a model response BEFORE any block is accepted:
+ *  - it is a JSON array whose length equals the number of requested blocks
+ *  - every id is one of the requested ids, appears exactly once (1:1), none omitted
+ * A failure means the model merged, split, dropped or duplicated lines and the
+ * whole chunk must be re-requested (never patched by copying neighbouring lines).
+ */
+export function checkResponseStructure(expected: SrtBlock[], raw: unknown): StructureCheck {
+  if (!Array.isArray(raw)) return { ok: false, issues: ["response is not a JSON array"] };
+  const issues: string[] = [];
+  if (raw.length !== expected.length) {
+    issues.push(`length mismatch: expected ${expected.length} items, got ${raw.length}`);
+  }
+
+  const expectedIds = new Set(expected.map((b) => b.key));
+  const seen = new Set<string>();
+  const duplicate: string[] = [];
+  const unexpected: string[] = [];
+  let invalid = 0;
+  for (const item of raw) {
+    const rec = item && typeof item === "object" ? (item as Record<string, unknown>) : undefined;
+    const id = normaliseId(rec?.id);
+    if (id === undefined || typeof rec?.text !== "string") {
+      invalid += 1;
+    } else if (!expectedIds.has(id)) {
+      unexpected.push(id);
+    } else if (seen.has(id)) {
+      duplicate.push(id);
+    } else {
+      seen.add(id);
+    }
+  }
+  const missing = expected.filter((b) => !seen.has(b.key)).map((b) => b.key);
+  const sample = (ids: string[]) => `${ids.slice(0, 6).join(", ")}${ids.length > 6 ? ` … (+${ids.length - 6})` : ""}`;
+  if (invalid) issues.push(`${invalid} item(s) without a valid {id, text}`);
+  if (missing.length) issues.push(`missing id(s): ${sample(missing)}`);
+  if (duplicate.length) issues.push(`duplicate id(s): ${sample(duplicate)}`);
+  if (unexpected.length) issues.push(`unexpected id(s): ${sample(unexpected)}`);
+  return { ok: issues.length === 0, issues };
+}
+
 /**
  * Validates a whole model response against the blocks that were requested.
  * Accepts only blocks that are present, pure Sinhala, and actually translated.
@@ -185,7 +266,7 @@ export function sanitizeAndValidateSinhalaSRT(expected: SrtBlock[], raw: unknown
     for (const item of raw) {
       if (!item || typeof item !== "object") continue;
       const rec = item as Record<string, unknown>;
-      const id = typeof rec.id === "number" ? String(rec.id) : typeof rec.id === "string" ? rec.id.trim() : undefined;
+      const id = normaliseId(rec.id);
       const text = typeof rec.text === "string" ? rec.text : typeof rec.translatedText === "string" ? rec.translatedText : undefined;
       if (id === undefined || text === undefined) continue;
       if (!expectedIds.has(id)) {
@@ -196,19 +277,72 @@ export function sanitizeAndValidateSinhalaSRT(expected: SrtBlock[], raw: unknown
     }
   }
 
+  let previous: { source: string; text: string } | undefined;
   for (const block of expected) {
     const output = byId.get(block.key);
     if (output === undefined) {
       result.stats.missing += 1;
       result.rejected.push({ block, reasons: [Array.isArray(raw) ? "missing from model output" : "malformed model response"] });
+      previous = undefined;
       continue;
     }
     const check = validateSinhalaBlock(block.text, output);
     if (check.fixes.length) result.stats.autoCleaned += 1;
     if (check.fixes.some((f) => f.startsWith("stripped"))) result.stats.parentheticalsStripped += 1;
     if (check.foreignScripts.length) result.stats.foreignScriptBlocks += 1;
-    if (check.problems.length) result.rejected.push({ block, rejectedOutput: output, reasons: check.problems });
-    else result.accepted.set(block.key, check.text);
+
+    // A block must never just repeat its neighbour's translation (the signature of merged/shifted lines).
+    if (
+      !check.problems.length &&
+      previous &&
+      previous.source.trim() !== block.text.trim() &&
+      check.text.length > 8 &&
+      previous.text === check.text
+    ) {
+      check.problems.push("duplicates the previous block's translation");
+    }
+
+    if (check.problems.length) {
+      // Keep `previous` = last ACCEPTED block, so a run of repeated lines is rejected as a whole.
+      result.rejected.push({ block, rejectedOutput: output, reasons: check.problems });
+    } else {
+      result.accepted.set(block.key, check.text);
+      previous = { source: block.text, text: check.text };
+    }
   }
   return result;
+}
+
+/**
+ * Regression self-test: runs known-good Sinhala (conjuncts with ZWJ, dependent
+ * vowel signs, virama, loan words, digits) through the sanitizer and reports
+ * any character that was stripped, altered or detached. Returns failure messages
+ * (empty array = all good).
+ */
+export function selfTestSinhalaPreservation(): string[] {
+  const samples: Array<[string, string]> = [
+    ["Sri Lanka", "ශ්\u200Dරී ලංකාව"],
+    ["Cricket", "ක්\u200Dරිකට් ගහමු"],
+    ["Rakaransaya and yansaya", "ප්\u200Dරශ්නය තියෙන්නේ ක්\u200Dෂණිකව"],
+    ["Vowel signs", "කියන්න බැහැ, දැන් මේක පිළිගන්න ඕනේ, ඒක ගොඩක් ලස්සනයි"],
+    ["Loan words", "ප්රැක්ටිස්, සීරියස්, පාටි, කොලේජ්, රූම් මේට්, සෙනෙටර්"],
+    ["It costs $75", "ඩොලර් 75ක් වැය වෙනවා"],
+    ["<i>Hey</i>", "<i>ඔයා ඇත්තටම හිතනවාද?</i>"],
+  ];
+  const failures: string[] = [];
+  for (const [source, sinhala] of samples) {
+    const { text, problems } = validateSinhalaBlock(source, sinhala);
+    const original = sinhala.normalize("NFC");
+    if (problems.length) failures.push(`"${sinhala}" rejected: ${problems.join("; ")}`);
+    if (text !== original) failures.push(`"${sinhala}" altered to "${text}"`);
+    if ((text.match(SINHALA_CHAR_G)?.length ?? 0) !== (original.match(SINHALA_CHAR_G)?.length ?? 0)) {
+      failures.push(`"${sinhala}" lost Sinhala characters`);
+    }
+    if ((text.match(/\u200D/g)?.length ?? 0) !== (original.match(/\u200D/g)?.length ?? 0)) {
+      failures.push(`"${sinhala}" lost ZWJ characters`);
+    }
+  }
+  const orphan = validateSinhalaBlock("Test", "\u0DD2 කියන්නේ මොකක්ද");
+  if (!orphan.problems.some((p) => p.includes("detached"))) failures.push("detached vowel sign was not detected");
+  return failures;
 }

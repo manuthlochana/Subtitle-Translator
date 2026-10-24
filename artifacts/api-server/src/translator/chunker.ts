@@ -3,7 +3,8 @@
  */
 
 import { CHUNKED_BLOCKS, MEGA_CHUNK_BLOCKS, type ExecutionStrategy } from "./models";
-import type { SrtBlock } from "./srt";
+import type { ContextBlock } from "./prompts";
+import { isUntranslatable, type SrtBlock } from "./srt";
 
 /**
  * Output-token budget per request. Leaves headroom under the 65K output cap
@@ -60,4 +61,30 @@ export function estimateRemainingChunks(pending: SrtBlock[], strategy: Execution
     count += 1;
   }
   return count;
+}
+
+/** Number of already-translated lines carried into the next chunk as read-only context. */
+export const CONTEXT_LINES = { min: 3, max: 5 } as const;
+
+/**
+ * Context sliding: returns the last 3–5 already-translated lines that precede
+ * `beforeIndex` (the position of the first block of the chunk about to be sent),
+ * oldest first. The prompt builder labels them `[PREVIOUS_CONTEXT_DO_NOT_TRANSLATE]`
+ * so the model keeps tone, pronoun register and terminology across chunk
+ * boundaries without re-translating them. Symbol-only lines (♪, tags) are skipped.
+ */
+export function buildSlidingContext(
+  blocks: SrtBlock[],
+  translations: ReadonlyMap<string, string>,
+  beforeIndex: number,
+  count: number = CONTEXT_LINES.max,
+): ContextBlock[] {
+  const wanted = Math.max(CONTEXT_LINES.min, Math.min(CONTEXT_LINES.max, count));
+  const context: ContextBlock[] = [];
+  for (let i = beforeIndex - 1; i >= 0 && context.length < wanted; i -= 1) {
+    const block = blocks[i];
+    const sinhala = translations.get(block.key);
+    if (sinhala !== undefined && !isUntranslatable(block.text)) context.unshift({ source: block.text, sinhala });
+  }
+  return context;
 }
